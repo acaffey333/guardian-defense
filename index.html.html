@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>GUARDIAN: INDUSTRIAL DEFENSE</title>
+    <style>
+        body { margin: 0; background: #000; overflow: hidden; touch-action: none; font-family: 'Courier New', monospace; color: #00ffea; }
+        canvas { display: block; background: #050508; }
+        
+        /* UI Layers */
+        .overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; background: rgba(0,0,0,0.9); z-index: 20; text-align: center; }
+        #game-ui { position: absolute; top: 15px; left: 15px; pointer-events: none; z-index: 10; font-weight: bold; width: calc(100% - 30px); display: none; justify-content: space-between; }
+        
+        h1 { font-size: 3.5rem; margin-bottom: 0; text-shadow: 0 0 20px #00ffea; letter-spacing: 5px; }
+        .btn { padding: 15px 50px; background: transparent; border: 3px solid #00ffea; color: #00ffea; font-family: inherit; font-size: 1.2rem; cursor: pointer; margin-top: 30px; text-transform: uppercase; letter-spacing: 2px; }
+        .btn:active { background: #00ffea; color: #000; }
+        
+        #high-score-text { margin-top: 15px; color: #ffff00; font-size: 1.2rem; }
+        #hp-bar { width: 120px; height: 12px; border: 1px solid #00ffea; display: inline-block; vertical-align: middle; }
+        #hp-fill { height: 100%; background: #ff3333; width: 100%; transition: width 0.2s; }
+        #msg { position: absolute; top: 80px; width: 100%; text-align: center; color: #ffff00; font-size: 1.5rem; font-weight: bold; pointer-events: none; z-index: 10; text-shadow: 2px 2px #000; }
+    </style>
+</head>
+<body>
+    <div id="main-menu" class="overlay">
+        <h1>GUARDIAN</h1>
+        <div id="high-score-text">SECTOR RECORD: <span id="high-val">0</span> KILLS</div>
+        <button class="btn" onclick="startGame()">INITIALIZE SYSTEMS</button>
+        <p style="font-size: 0.8rem; margin-top: 40px; color: #555;">INDUSTRIAL DEFENSE PROTOCOL v1.0</p>
+    </div>
+
+    <div id="game-ui">
+        <div>CORE: <div id="hp-bar"><div id="hp-fill"></div></div></div>
+        <div style="text-align: right;">
+            SECTOR: <span id="lvl-val" style="color:#ffff00">1</span><br>
+            KILLS: <span id="score-val">0</span>
+        </div>
+    </div>
+
+    <div id="msg"></div>
+    <canvas id="gameCanvas"></canvas>
+
+<script>
+    const canvas = document.getElementById("gameCanvas");
+    const ctx = canvas.getContext("2d");
+    
+    // Auto-resize
+    function resize() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // Game Variables
+    let gameState = "MENU";
+    let score = 0, hp = 100, currentLevel = 1, shakeTime = 0;
+    let highScore = localStorage.getItem("guardianRecord") || 0;
+    document.getElementById("high-val").innerText = highScore;
+
+    // Entities
+    const block = { x: canvas.width/2-75, y: canvas.height/2-40, w: 150, h: 80, color: "#4a4e54", roof: "#60646b", side: "#2c2f33" };
+    const player = { x: 100, y: 100, w: 20, h: 30, speed: 6, vx: 0, vy: 0 };
+    const repairPad = { x: block.x + 50, y: block.y + 110, w: 50, h: 15 };
+    
+    let enemies = [], bullets = [], explosions = [];
+    let lastPlayerShot = 0, lastSentryShot = 0;
+
+    // Mobile Controls
+    let joystick = { active: false, startX: 0, startY: 0, currX: 0, currY: 0, maxDist: 60 };
+    let fireBtn = { x: canvas.width - 80, y: canvas.height - 80, r: 45, active: false };
+
+    // --- GAME ENGINE ---
+
+    function startGame() {
+        score = 0; hp = 100; currentLevel = 1;
+        enemies = []; bullets = []; explosions = [];
+        player.x = 50; player.y = 50;
+        gameState = "PLAYING";
+        document.getElementById("main-menu").style.display = "none";
+        document.getElementById("game-ui").style.display = "flex";
+        spawnInitialWave();
+        triggerHaptic(100);
+    }
+
+    function spawnInitialWave() {
+        for(let i=0; i < 4; i++) spawnMissile();
+    }
+
+    function spawnMissile() {
+        const side = Math.floor(Math.random() * 4);
+        let x, y;
+        if (side === 0) { x = -50; y = Math.random() * canvas.height; }
+        else if (side === 1) { x = canvas.width + 50; y = Math.random() * canvas.height; }
+        else if (side === 2) { x = Math.random() * canvas.width; y = -50; }
+        else { x = Math.random() * canvas.width; y = canvas.height + 50; }
+        enemies.push({ x, y, speed: 1.2 + (currentLevel * 0.3) });
+    }
+
+    function triggerHaptic(ms) { if (window.navigator.vibrate) window.navigator.vibrate(ms); }
+
+    // --- INPUT ---
+    window.addEventListener("touchstart", e => {
+        if (gameState !== "PLAYING") return;
+        for (let t of e.touches) {
+            if (t.clientX < canvas.width / 2) {
+                joystick.active = true; joystick.startX = t.clientX; joystick.startY = t.clientY;
+                joystick.currX = t.clientX; joystick.currY = t.clientY;
+            } else { fireBtn.active = true; }
+        }
+    });
+
+    window.addEventListener("touchmove", e => {
+        if (!joystick.active) return;
+        for (let t of e.touches) {
+            if (t.clientX < canvas.width / 2) {
+                joystick.currX = t.clientX; joystick.currY = t.clientY;
+            }
+        }
+    });
+
+    window.addEventListener("touchend", e => {
+        if (e.touches.length === 0) { joystick.active = false; fireBtn.active = false; }
+    });
+
+    // --- UPDATE ---
+    function update() {
+        if (gameState !== "PLAYING") return;
+
+        // Level Progression
+        let nextLvlThreshold = currentLevel * 15;
+        if (score >= nextLvlThreshold) {
+            currentLevel++;
+            hp = Math.min(100, hp + 20); // Bonus repair
+            document.getElementById("msg").innerText = "SECTOR " + currentLevel + " CLEARANCE";
+            triggerHaptic([100, 50, 100]);
+            setTimeout(() => document.getElementById("msg").innerText = "", 2000);
+        }
+
+        // Movement
+        if (joystick.active) {
+            let dx = joystick.currX - joystick.startX, dy = joystick.currY - joystick.startY;
+            let dist = Math.min(Math.hypot(dx, dy), joystick.maxDist);
+            let angle = Math.atan2(dy, dx);
+            player.vx = Math.cos(angle) * (dist / joystick.maxDist) * player.speed;
+            player.vy = Math.sin(angle) * (dist / joystick.maxDist) * player.speed;
+        } else { player.vx *= 0.8; player.vy *= 0.8; }
+        player.x += player.vx; player.y += player.vy;
+
+        // Repair Zone
+        if (player.x < repairPad.x+repairPad.w && player.x+player.w > repairPad.x && 
+            player.y < repairPad.y+repairPad.h && player.y+player.h > repairPad.y) {
+            if (hp < 100) hp += 0.12;
+        }
+
+        // Shooting
+        let now = Date.now();
+        if (fireBtn.active && now - lastPlayerShot > 450) {
+            bullets.push({ x: player.x+10, y: player.y, vx: 0, vy: -10, type: "p" });
+            lastPlayerShot = now;
+        }
+
+        // Auto Turrets
+        if (now - lastSentryShot > (700 / currentLevel) && enemies.length > 0) {
+            let target = enemies[0];
+            let angle = Math.atan2(target.y - block.y, target.x - (block.x+75));
+            bullets.push({ x: block.x+75, y: block.y, vx: Math.cos(angle)*9, vy: Math.sin(angle)*9, type: "s" });
+            lastSentryShot = now;
+        }
+
+        // Missiles Logic
+        enemies.forEach((m, i) => {
+            let angle = Math.atan2((block.y+40)-m.y, (block.x+75)-m.x);
+            m.x += Math.cos(angle)*m.speed; m.y += Math.sin(angle)*m.speed;
+
+            if (m.x > block.x && m.x < block.x+block.w && m.y > block.y && m.y < block.y+block.h) {
+                hp -= 10; shakeTime = 12; triggerHaptic(70);
+                enemies.splice(i, 1); spawnMissile();
+                if (hp <= 0) endGame();
+            }
+        });
+
+        // Bullet & AOE Collision
+        bullets.forEach((b, bi) => {
+            b.x += b.vx; b.y += b.vy;
+            enemies.forEach((m, mi) => {
+                if (Math.hypot(b.x - m.x, b.y - m.y) < 25) {
+                    if (b.type === "p") explosions.push({ x: b.x, y: b.y, r: 5, life: 1.0 });
+                    else { enemies.splice(mi, 1); score++; spawnMissile(); }
+                    bullets.splice(bi, 1);
+                }
+            });
+            if (b.y < -50 || b.y > canvas.height+50) bullets.splice(bi, 1);
+        });
+
+        explosions.forEach((exp, ei) => {
+            exp.r += 5; exp.life -= 0.06;
+            enemies.forEach((m, mi) => {
+                if (Math.hypot(exp.x - m.x, exp.y - m.y) < exp.r) {
+                    enemies.splice(mi, 1); score++; spawnMissile();
+                }
+            });
+            if (exp.life <= 0) explosions.splice(ei, 1);
+        });
+
+        if (shakeTime > 0) shakeTime--;
+        
+        // UI Updates
+        document.getElementById("hp-fill").style.width = hp + "%";
+        document.getElementById("score-val").innerText = score;
+        document.getElementById("lvl-val").innerText = currentLevel;
+    }
+
+    function endGame() {
+        gameState = "MENU";
+        triggerHaptic(600);
+        if (score > highScore) {
+            highScore = score;
+            localStorage.setItem("guardianRecord", highScore);
+            document.getElementById("high-val").innerText = highScore;
+        }
+        document.getElementById("main-menu").style.display = "flex";
+        document.getElementById("game-ui").style.display = "none";
+    }
+
+    // --- DRAW ---
+    function draw() {
+        ctx.save();
+        if (shakeTime > 0) ctx.translate((Math.random()-0.5)*12, (Math.random()-0.5)*12);
+        ctx.clearRect(-50, -50, canvas.width+100, canvas.height+100);
+
+        if (gameState === "PLAYING") {
+            // Repair Pad
+            ctx.fillStyle = "#00ff00"; ctx.globalAlpha = 0.2;
+            ctx.fillRect(repairPad.x, repairPad.y, repairPad.w, repairPad.h);
+            ctx.globalAlpha = 1.0;
+
+            // Isometric Block
+            ctx.fillStyle = block.side; ctx.beginPath();
+            ctx.moveTo(block.x+block.w, block.y); ctx.lineTo(block.x+block.w+20, block.y-15);
+            ctx.lineTo(block.x+block.w+20, block.y+block.h-15); ctx.lineTo(block.x+block.w, block.y+block.h); ctx.fill();
+            ctx.fillStyle = block.roof; ctx.beginPath();
+            ctx.moveTo(block.x, block.y); ctx.lineTo(block.x+20, block.y-15);
+            ctx.lineTo(block.x+block.w+20, block.y-15); ctx.lineTo(block.x+block.w, block.y); ctx.fill();
+            ctx.fillStyle = block.color; ctx.fillRect(block.x, block.y, block.w, block.h);
+            
+            // Detail Lines
+            ctx.strokeStyle = "#222"; ctx.lineWidth = 2;
+            ctx.strokeRect(block.x, block.y, block.w, block.h);
+
+            // Player & Missiles
+            ctx.fillStyle = "#fff"; ctx.fillRect(player.x, player.y, player.w, player.h);
+            enemies.forEach(m => {
+                ctx.fillStyle = "red"; ctx.beginPath(); ctx.arc(m.x, m.y, 8, 0, Math.PI*2); ctx.fill();
+                ctx.fillStyle = "orange"; ctx.beginPath(); ctx.arc(m.x, m.y, 4, 0, Math.PI*2); ctx.fill();
+            });
+
+            // Explosions
+            explosions.forEach(exp => {
+                ctx.beginPath(); ctx.arc(exp.x, exp.y, exp.r, 0, Math.PI*2);
+                ctx.strokeStyle = `rgba(255, 165, 0, ${exp.life})`; ctx.lineWidth = 4; ctx.stroke();
+            });
+
+            // Projectiles
+            bullets.forEach(b => { ctx.fillStyle = b.type === "p" ? "#fff" : "#ff0"; ctx.fillRect(b.x, b.y, 4, 4); });
+        }
+        ctx.restore();
+
+        // HUD
+        if (gameState === "PLAYING") {
+            if (joystick.active) {
+                ctx.strokeStyle = "rgba(0,255,234,0.2)"; ctx.beginPath();
+                ctx.arc(joystick.startX, joystick.startY, joystick.maxDist, 0, Math.PI*2); ctx.stroke();
+                ctx.fillStyle = "rgba(0,255,234,0.3)"; ctx.beginPath();
+                ctx.arc(joystick.currX, joystick.currY, 20, 0, Math.PI*2); ctx.fill();
+            }
+            ctx.fillStyle = fireBtn.active ? "rgba(255,0,0,0.5)" : "rgba(0,255,234,0.2)";
+            ctx.beginPath(); ctx.arc(fireBtn.x, fireBtn.y, fireBtn.r, 0, Math.PI*2); ctx.fill();
+            ctx.fillStyle = "white"; ctx.font = "bold 12px Arial"; ctx.textAlign = "center";
+            ctx.fillText("FIRE", fireBtn.x, fireBtn.y+5);
+        }
+    }
+
+    function loop() { update(); draw(); requestAnimationFrame(loop); }
+    loop();
+</script>
+</body>
+</html>
+
+
+
+
+
+
+
+
+
+
+
